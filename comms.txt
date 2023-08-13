@@ -1,0 +1,417 @@
+#include <Windows.h>
+#include <iostream>
+#include <string>
+#include <mutex>
+#include <vector>
+
+#define ioctl_read_memory CTL_CODE(FILE_DEVICE_UNKNOWN, 0x713419, METHOD_BUFFERED, FILE_SPECIAL_ACCESS)
+#define ioctl_write_memory CTL_CODE(FILE_DEVICE_UNKNOWN, 0x5413C7, METHOD_BUFFERED, FILE_SPECIAL_ACCESS)
+#define ioctl_get_module_base CTL_CODE(FILE_DEVICE_UNKNOWN, 0x2173C3, METHOD_BUFFERED, FILE_SPECIAL_ACCESS) 
+#define ioctl_protect_virutal_memory CTL_CODE(FILE_DEVICE_UNKNOWN, 0x5173C1, METHOD_BUFFERED, FILE_SPECIAL_ACCESS) 
+#define ioctl_allocate_virtual_memory CTL_CODE(FILE_DEVICE_UNKNOWN, 0x6172C8, METHOD_BUFFERED, FILE_SPECIAL_ACCESS)
+#define IOCTL_READ_CR3 CTL_CODE(FILE_DEVICE_UNKNOWN, 0x802, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_WRITE_CR3 CTL_CODE(FILE_DEVICE_UNKNOWN, 0x803, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+typedef struct _k_get_base_module_request {
+	ULONG pid;
+	ULONGLONG handle;
+	WCHAR name[260];
+} k_get_base_module_request, * pk_get_base_module_request;
+
+typedef struct _k_rw_request {
+	ULONG pid;
+	ULONGLONG src;
+	ULONGLONG dst;
+	ULONGLONG size;
+} k_rw_request, * pk_rw_request;
+
+typedef struct _k_protect_mem_request {
+	ULONG pid, protect;
+	ULONGLONG addr;
+	SIZE_T size;
+} k_protect_mem_request, * pk_protect_mem_request;
+typedef NTSTATUS(*NtAllocateVirtualMemory_t)(HANDLE, PVOID*, ULONG_PTR, SIZE_T*, ULONG, ULONG);
+typedef struct _k_attach_process_request
+{
+	ULONGLONG pid;
+} k_attach_process_request, * pk_attach_process_request;
+
+
+DWORD KM_PID;
+
+typedef struct _K_RW_REQUEST {
+	ULONG PID;
+	ULONGLONG src;
+	ULONGLONG dst;
+	ULONGLONG size;
+} K_RW_REQUEST, * PK_RW_REQUEST;
+
+typedef struct _K_GET_BASE_MODULE_REQUEST {
+	ULONG PID;
+	ULONGLONG handle;
+	WCHAR name[260];
+} K_GET_BASE_MODULE_REQUEST, * PK_GET_BASE_MODULE_REQUEST;
+typedef struct _k_alloc_mem_request {
+	ULONG64 pid;
+	PVOID addr;
+	SIZE_T size;
+	ULONG allocation_type;
+	ULONG protect;
+} k_alloc_mem_request, * pk_alloc_mem_request;
+typedef struct _k_free_mem_request
+{
+	ULONGLONG pid;
+	ULONGLONG addr;
+	ULONG free_type;
+} k_free_mem_request, * pk_free_mem_request;
+class Memory
+{
+public:
+	Memory(DWORD PID);
+
+	uintptr_t GetBaseAddress(const std::string& module_name);
+
+}; extern Memory* pMem;
+
+std::vector<std::thread> thread_pool;
+std::mutex mtx;
+HANDLE hDriver;
+BOOL Setup() {
+
+	hDriver = CreateFileW((L"\\\\.\\\MemPool"), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+	if (hDriver == INVALID_HANDLE_VALUE) {
+		printf(" Driver not loaded.\n");
+		return false;
+	}
+	return true;
+}
+
+Memory::Memory(DWORD PID) {
+	KM_PID = PID;
+	Setup();
+}
+
+
+uintptr_t Memory::GetBaseAddress(const std::string& module_name) {
+	K_GET_BASE_MODULE_REQUEST request;
+	request.PID = KM_PID;
+	request.handle = 0;
+
+	std::wstring wstr(module_name.begin(), module_name.end());
+	ZeroMemory(request.name, sizeof(request.name));
+	wcscpy_s(request.name, sizeof(request.name) / sizeof(WCHAR), wstr.c_str());
+
+	DWORD junk;
+	BOOL status = DeviceIoControl(hDriver, ioctl_get_module_base, &request, sizeof(K_GET_BASE_MODULE_REQUEST), &request, sizeof(K_GET_BASE_MODULE_REQUEST), &junk, nullptr);
+
+	if (status) {
+		return request.handle;
+	}
+	else {
+		printf(" Driver: failure to get base address.\n");
+		return 0;
+	}
+
+}
+	
+
+
+
+void ReadMemoryFromKernel(int processId, uint64_t address, void* buffer, size_t size)
+{
+	if (processId <= 0 || address == 0 || buffer == NULL || size == 0)
+	{
+		return;
+	}
+
+	k_rw_request request;
+	request.pid = processId;
+	request.src = address;
+	request.dst = (uint64_t)buffer;
+	request.size = size;
+
+	OVERLAPPED ovl = { 0 };
+	DWORD bytesReturned;
+
+	BOOL status = DeviceIoControl(hDriver, ioctl_read_memory, &request, sizeof(K_RW_REQUEST), &request, sizeof(K_RW_REQUEST), &bytesReturned, &ovl);
+	if (!status)
+	{
+		}
+}
+
+void WriteMemoryFromKernel(int processId, uint64_t address, void* buffer, size_t size)
+{
+	if (processId <= 0 || address == 0 || buffer == NULL || size == 0)
+	{
+		return;
+	}
+
+	k_rw_request request;
+	request.pid = processId;
+	request.src = address;
+	request.dst = (uint64_t)buffer;
+	request.size = size;
+
+	OVERLAPPED ovl = { 0 };
+	DWORD bytesReturned;
+
+	BOOL status = DeviceIoControl(hDriver, ioctl_write_memory, &request, sizeof(K_RW_REQUEST), &request, sizeof(K_RW_REQUEST), &bytesReturned, &ovl);
+	if (!status)
+	{
+	}
+}
+void Read_CR3(int processId, uint64_t address, void* buffer, size_t size)
+{
+	if (processId <= 0 || address == 0 || buffer == NULL || size == 0)
+	{
+		return;
+	}
+
+	k_rw_request request;
+	request.pid = processId;
+	request.src = address;
+	request.dst = (uint64_t)buffer;
+	request.size = size;
+
+	OVERLAPPED ovl = { 0 };
+	DWORD bytesReturned;
+
+	BOOL status = DeviceIoControl(hDriver, IOCTL_READ_CR3, &request, sizeof(K_RW_REQUEST), &request, sizeof(K_RW_REQUEST), &bytesReturned, &ovl);
+	if (!status)
+	{
+	}
+}
+
+void Write_CR3(int processId, uint64_t address, void* buffer, size_t size)
+{
+	if (processId <= 0 || address == 0 || buffer == NULL || size == 0)
+	{
+		return;
+	}
+
+	k_rw_request request;
+	request.pid = processId;
+	request.src = address;
+	request.dst = (uint64_t)buffer;
+	request.size = size;
+
+	OVERLAPPED ovl = { 0 };
+	DWORD bytesReturned;
+
+	BOOL status = DeviceIoControl(hDriver, IOCTL_WRITE_CR3, &request, sizeof(K_RW_REQUEST), &request, sizeof(K_RW_REQUEST), &bytesReturned, &ovl);
+	if (!status)
+	{
+	}
+}
+template <typename T>
+typename std::enable_if<!std::is_pointer<T>::value, T>::type RpmCR3(uint64_t address) {
+	T buffer;
+	Read_CR3(KM_PID, address, &buffer, sizeof(T));
+	return buffer;
+}
+
+bool RpmsCR3(PVOID address, void* buffer, size_t size)
+{
+	if (address == nullptr || buffer == nullptr || size == 0) {
+		// Invalid parameters
+		return false;
+	}
+	Read_CR3(KM_PID, reinterpret_cast<uint64_t>(address), buffer, size);
+	return true;
+}
+template <typename T>
+typename std::enable_if<!std::is_pointer<T>::value, T>::type Rpm(uint64_t address) {
+	T buffer;
+	ReadMemoryFromKernel(KM_PID, address, &buffer, sizeof(T));
+	return buffer;
+}
+
+bool Rpms(PVOID address, void* buffer, size_t size)
+{
+	if (address == nullptr || buffer == nullptr || size == 0) {
+		// Invalid parameters
+		return false;
+	}
+	ReadMemoryFromKernel(KM_PID, reinterpret_cast<uint64_t>(address), buffer, size);
+	return true;
+}
+bool WpmaCR3(PVOID address, void* buffer, size_t size)
+{
+	if (address == nullptr || buffer == nullptr || size == 0) {
+		// Invalid parameters
+		return false;
+	}
+	Write_CR3(KM_PID, reinterpret_cast<uint64_t>(address), buffer, size);
+	return true;
+}
+
+template<typename T>
+inline void WpmCR3(uint64_t address, T value)
+{
+	WpmaCR3((PVOID)address, &value, sizeof(T));
+}
+bool Wpma(PVOID address, void* buffer, size_t size)
+{
+	if (address == nullptr || buffer == nullptr || size == 0) {
+		// Invalid parameters
+		return false;
+	}
+	WriteMemoryFromKernel(KM_PID, reinterpret_cast<uint64_t>(address), buffer, size);
+	return true;
+}
+
+template<typename T>
+inline void Wpm(uint64_t address, T value)
+{
+	Wpma((PVOID)address, &value, sizeof(T));
+}
+
+#include <Windows.h>
+#include <string>
+#include <thread>
+#include <TlHelp32.h>
+using namespace std;
+DWORD GetPROCESSID(string name) {
+	PROCESSENTRY32 ProcessEntry;
+	ProcessEntry.dwSize = sizeof(PROCESSENTRY32);
+	HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, NULL);
+
+	if (Process32First(snapshot, &ProcessEntry) == (int)1) {
+		while (Process32Next(snapshot, &ProcessEntry) == (int)1) {
+			if (string(ProcessEntry.szExeFile) == name)
+				return ProcessEntry.th32ProcessID;
+		}
+	}
+
+	CloseHandle(snapshot);
+	return NULL;
+}
+
+Memory* caca = nullptr;
+namespace offsets
+{
+	uintptr_t Gameinstance = 0x1b8;
+	uintptr_t LocalPlayers = 0x38;
+	uintptr_t PlayerController = 0x30;
+	uintptr_t LocalPawn = 0x330;
+	uintptr_t PlayerState = 0x2a8;
+	uintptr_t RootComponet = 0x190;
+	uintptr_t GameState = 0x158;
+	uintptr_t PersistentLevel = 0x30;
+
+	uintptr_t ActorCount = 0xA0;
+	uintptr_t Cameramanager = 0x340;
+	uintptr_t AActor = 0x98;
+	uintptr_t CurrentActor = 0x8;
+	uintptr_t Mesh = 0x310;
+	uintptr_t Revivefromdbnotime = 0x4698;
+	uintptr_t TeamId = 0x10C8;
+	uintptr_t ActorTeamId = 0x10C8;
+
+	uintptr_t LocalActorPos = 0x128;
+	uintptr_t ComponetToWorld = 0x240;
+	uintptr_t BoneArray = 0x600;
+	uintptr_t Velocity = 0xb8;
+	uintptr_t PawnPrivate = 0x300;
+	uintptr_t PlayerArray = 0x2a0;
+	uintptr_t relativelocation = 0x2E8;
+	uintptr_t UCharacterMovementComponent = 0x318;
+	uintptr_t entity_actor = 0x310;
+	uintptr_t bIsReloadingWeapon = 0x350;
+	uintptr_t GlobalAnimRateScale = 0xa58;
+	uintptr_t CurrentWeapon = 0x908;
+}
+DWORD_PTR Uworld;
+DWORD_PTR LocalPawn;
+DWORD_PTR PlayerState;
+DWORD_PTR Localplayer;
+DWORD_PTR Rootcomp;
+DWORD_PTR PlayerController;
+DWORD_PTR Persistentlevel;
+DWORD_PTR PlayerCamManager;
+uintptr_t baseaddy;
+void abc() {
+	DWORD_PTR bacata = Rpm<DWORD_PTR>(baseaddy + 0xEA84A78);
+	std::cout << "I just read uWorld:" << bacata;
+	DWORD_PTR Gameinstance = Rpm<DWORD_PTR>(bacata + 0x1b8);
+	std::cout << "\nOffset Gameinstance Returns: \n" << Gameinstance;
+
+	DWORD_PTR LocalPlayers = Rpm<DWORD_PTR>(Gameinstance + offsets::LocalPlayers);
+	std::cout << "\nOffset LocalPlayers Returns: \n" << LocalPlayers;
+
+	Localplayer = Rpm<DWORD_PTR>(LocalPlayers);
+	std::cout << "\nOffset Localplayer Returns: \n" << Localplayer;
+
+	PlayerController = Rpm<DWORD_PTR>(Localplayer + offsets::PlayerController);
+	std::cout << "\nOffset PlayerController Returns: \n" << PlayerController;
+
+	LocalPawn = Rpm<DWORD_PTR>(PlayerController + offsets::LocalPawn);
+	PlayerState = Rpm<DWORD_PTR>(LocalPawn + offsets::PlayerState);
+	Rootcomp = Rpm<DWORD_PTR>(LocalPawn + offsets::RootComponet);
+	Persistentlevel = Rpm<DWORD_PTR>(bacata + offsets::PersistentLevel);
+
+}
+DWORD WINAPI aca(LPVOID lpParam)
+{
+	while (true) {
+		Uworld = Rpm<DWORD_PTR>(baseaddy + 0xEA84A78);
+		std::cout << "\nOffset Uworld Returns: \n" << Uworld;
+
+		DWORD_PTR Gameinstance = Rpm<DWORD_PTR>(Uworld + offsets::Gameinstance);
+		DWORD_PTR LocalPlayers = Rpm<DWORD_PTR>(Gameinstance + offsets::LocalPlayers);
+		Localplayer = Rpm<DWORD_PTR>(LocalPlayers);
+		PlayerController = Rpm<DWORD_PTR>(Localplayer + offsets::PlayerController);
+		LocalPawn = Rpm<DWORD_PTR>(PlayerController + offsets::LocalPawn);
+		PlayerState = Rpm<DWORD_PTR>(LocalPawn + offsets::PlayerState);
+		Rootcomp = Rpm<DWORD_PTR>(LocalPawn + offsets::RootComponet);
+		Persistentlevel = Rpm<DWORD_PTR>(Uworld + offsets::PersistentLevel);
+		DWORD ActorCount = Rpm<DWORD>(Persistentlevel + offsets::ActorCount);
+		DWORD_PTR AActors = Rpm<DWORD_PTR>(Persistentlevel + offsets::AActor);
+			
+			Sleep(1);
+			std::cout << "\nOffset Gameinstance Returns: \n" << Gameinstance;
+
+		
+		
+	}
+}
+int main() {
+
+    std::cout << "Step 1: COMPLETED!\n";
+    std::cout << "Errors detected: 0\n";
+    Sleep(1000);
+    std::cout << "Step 2: Base Address\n";
+	DWORD_PTR ProcessId = GetPROCESSID("Notepad.exe");
+	if (!ProcessId) {
+		std::cout << (" Driver Error: Failed to get games PID please restart and remap driver") << endl;
+		Sleep(1000);
+	}
+
+	caca = new Memory(ProcessId);
+	 baseaddy = caca->GetBaseAddress("Notepad.exe");
+	if (!baseaddy) {
+		std::cout << " Driver Error: Failed to get games base address please restart and remap driver";
+		Sleep(3000);
+
+	}
+
+	std::cout << "base address is:\t " << baseaddy;
+	std::cout << "\npid:\t " << ProcessId;
+	
+
+
+	DWORD ilovewoman = Rpm<DWORD_PTR>(baseaddy + 0x01);
+	std::cout << "\n offset test:" << ilovewoman;
+
+	std::cout << "\nEverything works out just fine! \n";
+
+	std::cout << "Step 3\n";
+	std::cout << "\n Checking if the Driver [2] works (you have 2 drivers, AciWasHere and SpacePort) \n";
+	HANDLE cacaba = CreateFileW(L"\\\\.\\SpacePort", GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+	if (cacaba == INVALID_HANDLE_VALUE) {
+		std::cout << "Failed to find your driver [2]: " << GetLastError() << std::endl;
+		return 1;
+	}
+	std::cout << "\nEverything works out just fine! \n";
+	std::cin.ignore();
+}
