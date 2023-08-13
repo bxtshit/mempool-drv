@@ -11,3 +11,4 @@ mr throwoff, never sell a slotted.
 
 :clown_face:
 
+(creds to realcompiled on discord for the following files, btw this is dtc asf)
